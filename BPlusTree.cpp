@@ -310,10 +310,147 @@ static key_t non_leaf_split_left(bplus_tree * tree, bplus_node * node, bplus_nod
 		sub(node)[0] = sub(node)[split - 1];
 		split_key = key(node)[split-2];
 	}
+	// sum = node->children = 1 + (node->children - 1)
+	//right node left shift from key[split - 1] to key[children - 2]
 	memmove(&key(node)[0], &key(node)[split-1], (node->children - 1) * sizeof(key_t));
 	memmove(&sub(node)[1].&sub(node)[split],(node->children - 1) * sizeof(off_t);
 	return split_key;
 }
+
+static key_t non_leaf_split_right1(bplus_tree * tree, bplus_node * node, bolus_node * right, bplus_node * l_ch, bplus_node * r_ch, key_t key, int insert)
+{
+	int i,
+	int split = (_max_number + 1) / 2;
+	right_node_add(tree,node,right);
+	key_t split_key = key(node)[split-1];
+	int pivot = 0;
+	node->children = split;
+	right->children = _max_order - split + 1;
+	key(right)[0] = key;
+	sub_node_update(tree,right,pivot,l_ch);
+	sub_node_update(tree,right,pivot + 1, r_ch);
+	memmove(&key(right)[pivot+1], &key(node)[split],(right->children - 2) * sizeof(key_t));
+	memmove(&sub(right)[pivot+2],&sub(node)[split+1],(right->children - 2) * sizeof(off_t));
+	for(i = pivot + 2; i < right->children;i++)	sub_node_flush(tree,right,sub(right)[i]);
+	return split_key;
+}
+
+static key_t non_leaf_split_right2(bplus_tree * tree, bplus_node * node, bplus_node * right, bplus_node * l_ch, bplus_node * r_ch)
+{
+	int i;
+	int split = (_max_order + 1)/2;
+	right_node_add(tree,node,right);
+	key_t split_key = key(node)[split];
+	
+	int pivot = insert - split - 1;
+	node->children = split + 1;
+	right->children = _max_order - split;
+	memmove(&key(right)[0],&key(node)[split+1],pivot * sizeof(key_t));
+	memmove(&sub(right)[0],&sub(node)[split+1],pivot * sizeof(off_t));
+	for(i = 0; i < right->children;i++)
+	{
+		if(i != pivot && i != pivot + 1)	sub_node_flush(tree,right,sub(right)[i]);
+	}
+	return split_key;
+}
+
+static void non_leaf_simple_insert(bplus_tree * tree, bplus_node * node, bplus_node * l_ch, bplus_node * r_ch,key_t key, int insert)
+{
+	memmove(&key(node)[insert + 1],&key(node)[insert],(node->children - 1 - insert) * sizeof(key_t);
+	memmove(&sub(node)[insert + 2], &sub(node)[insert+1],(node->children - 1 - insert) * sizeof(off_t));
+	key(node)[insert]  = key;
+	sub_node_update(tree,node,insert,l_ch);
+	sub_node_update(tree,node,insert,r_ch);
+	node->children ++;
+}
+
+static int non_leaf_insert(bplus_tree * tree, bplus_node * node, bplus_node * l_ch, bplus_node * r_ch.key_t key)
+{
+	int insert = key_binary_search(node,key);
+	assert(insert < 0);
+	insert = -insert - 1;
+	if(node->children == _max_order)
+	{
+		key_t split_key;
+		int split = (node->children + 1) / 2;
+		bplus_node * sibling = non_leaf_new(tree);
+		if(insert < split)	split_key = non_leaf_split_left(tree,node,sibling,l_ch,r_ch,key,insert);
+		else if(insert == split)	split_key = non_leaf_split_right1(tree,node,sibling,l_ch,r_ch,key,insert);
+		else split_key = non_leaf_split_right2(tree,node,sibling,l_ch,r_ch,key,insert);
+		if(insert < split) return parent_node_build(tree,sibling,node,split_key);
+		else return parent_node_build(tree,node,sibling,split_key);
+	}
+	else 
+	{
+		non_leaf_simple_start(tree,node,l_ch,r_ch,key,insert);
+		node_flush(tree,node);
+	}
+	return 0;
+}
+
+
+static key_t leaf_split_left(bplus_tree * tree, bplus_node * leaf, bplus_node * left, key_t key, long data,int insert)
+{
+	int split = (leaf->children + 1) / 2;
+	left_node_add(tree,leaf,left);
+	int pivot = insert;
+	left->children = split;
+	leaf->children = _max_entries - split + 1;
+	memmove(&key(left)[0],&key(leaf)[0],pivot * sizeof(key_t));
+	memmove(&data(left)[0],&data(leaf)[0],pivot * sizeof(long));
+
+	key(left)[pivot] = key;
+	data(left)[pivot] = data;
+	
+	memmove(&key(left)[pivot + 1], &key(leaf)[pivot],(split - pivot - 1) * sizeof(key_t));
+	memmove(&data(left)[pivot + 1], &data(leaf)[pivot],(split - pivot - 1) * sizeof(long));
+	memmove(&key(leaf)[0],&key(leaf)[split - 1], leaf->children * sizeof(key_t));
+	memmove(&data(leaf)[0],&data(leaf)[split - 1], leaf->children * sizeof(long));
+	return key(leaf)[0];
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
