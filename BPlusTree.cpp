@@ -410,26 +410,362 @@ static key_t leaf_split_left(bplus_tree * tree, bplus_node * leaf, bplus_node * 
 }
 
 
+static key_t leaf_split_right(bplus_tree * tree, bplus_node * leaf, bplus_node * right, key_t key, long data, int insert)
+{
+	int split = (leaf->children + 1)/2;
+	right_node_add(tree,leaf,right);
+	int pivot = insert - split;
+	leaf->children = split;
+	right->children = _max_entries - split + 1;
+
+	memmove(&key(right)[0],&key(leaf)[split],pivot * sizeof(key_t));
+	memmove(&data(right)[0],&data(leaf)[split],pivot * sizeof(long));
+
+	key(right)[pivot] = key;
+	data(right)[pivot] = data;
+
+	memmove(&key(right)[pivot+1],&key(leaf)[insert],(_max_entries - insert) * sizeof(key_t));
+	memmove(&data(right)[pivot+1],&data(leaf)[insert],(_max_entires - insert) * sizeof(long));
+
+	return key(right)[0];
+}
+static void leaf_simple_insert(bplus_tree * tree, bplus_node * leaf, key_t key, long data, int insert)
+{
+	memmove(&key(leaf)[insert+1],&key(leaf)[insert],(leaf->children - insert) * sizeof(key_t));
+	memmove(&data(leaf)[insert+1],&data(leaf)[insert],(leaf->children - insert) * sizeof(long));
+	key(leaf)[insert] = key;
+	data(leaf)[insert] = data;
+	leaf->children++;
+}
+
+static int leaf_insert(bplus_tree * tree, bplus_node * leaf, key_t key, long data)
+{
+	int insert = key_binary_search(leaf,key);
+	if(insert >= 0)	return -1;
+	int i = ((char*)leaf - tree->caches)/_block_size;
+	tree->used[i] = 1;
+
+	if(leaf->children == _max_entries)
+	{
+		key_t split_key;
+		int split = (_max_entries + 1)/2;
+		bplus_node * sibling = leaf_new(tree);
+		if(insert < split) return parent_node_build(tree,sibling,leaf,split_key);
+		else return parent_node_build(tree,leaf,sibling,split_key);
+	}
+	else 
+	{
+		leaf_simple_insert(tree,leaf,key,data,insert);
+		node_flush(tree,leaf);
+	}
+	return 0;
+}
+
+static int bplus_tree_insert(bplus_tree * tree,key_t key, long data)
+{
+	bplus_node * node = node_seek(tree,tree->root);
+	while(node)
+	{
+		if(is_leaf(node))	return leaf_insert(tree,node,key,data);
+		else 
+		{
+			int i = key_binary_search(node,key);
+			if(i >= 0) node = node_seek(tree,sub(node)[i+1]);
+			else 
+			{
+				i = -i-1;
+				node = node_seek(tree,sub(node)[i]);
+			}
+		}
+	}
+
+	bplus_node * root = leaf_new(tree);
+	key(root)[0] = key;
+	data(root)[0] = data;
+	root->children = 1;
+	tree->root = new_node_append(tree,root);
+	tree->level = 1;
+	node_flush(tree,root);
+	return 0;
+}
+
+static inline int sibling_select(bplus_node * l_sib, bplus_node * r_sib, bplus_node * parent, int i)
+{
+	if(i == -1) return Right_Sibling;
+	else if(i == parent->children - 2) return Left_Sibling;
+	else	return l_sib->children >= r_sib->children ? Left_Sibling : Right_Sibling;
+}
+
+static void non_leaf_shift_from_left(bplus_tree * tree, bplus_node * node, bplus_node * left, bplus_node * parent, int parent_key_index, int remove)
+{
+	memmove(&key(left)[left->children],&key(node)[0],remove * sizeof(key_t));
+	memmove(&sub(left)[left->children],&sub(node)[0],(remove+1)*sizeof(off_t));
+
+	key(node)[0] = key(parent)[parent_key_index];
+	key(parent)[parent_key_index] = key(left)[left->children - 2];
+
+	sub(node)[0] = sub(left)[left->children - 1];
+	sub_node_flush(tree,node,sub(node)[0]);
+	left->children--;
+}
 
 
+static void non_leaf_merge_into_left(bplus_tree * tree, bplus_node * node, bplus_node * left, bplus_node * parent, int parent_key_index, int remove)
+{
+	key(left)[left->children - 1] = key(parent)[parent_key_index];
+
+	memmove(&key(left)[left->children],&key(node)[0],remove * sizeof(key_t));
+	memmove(&sub(left)[left->children],&sub(node)[0].(remove + 1) * sizeof(off_t));
+
+	memmove(&key(left)[left->children+remove],&key(node)[remove+1],(node->children - remove - 2) * sizeof(key_t));
+	memmove(&sub(left)[left->children + remove + 1],&sub(node)[remove + 2],(node->children - remove - 2) * sizeof(off_t));
+
+	int i,j;
+	for(i = left->children,j = 0; i < node->children - i;i++,j++)	sub_node_flush(tree,left,sub(left)[i]);
+
+	left->children += node->children - 1;
+}
+
+static void non_leaf_shift_from_right(bplus_tree * tree, bplus_node * node, bplus_node * right, bplus_node * parent, int parent_key_index)
+{
+	key(node)[node->children - 1] = key(parent)[parent_key_index];
+	key(parent)[parent_key_index] = key(right)[0];
+	sub(node)[node->children] = sub(right)[0];
+	sub_node_flush(tree,node,sub(node)[node->children]);
+	node->children++;
+
+	memmove(&key(right)[0],&key(right)[1],(right->children - 2) * sizeof(key_t));
+	memmove(&sub(right)[0].&sub(right)[1],(right->children - 1) * sizeof(off_t));
+
+	right->children--;
+}
+
+static void non_leaf_merge_from_right(bplus_tree * tree, bplus_node * node, bplus_node * right, bplus_node * parent,int parent_key_index)
+{
+	key(node)[node->children - 1] = key(parent)[parent_key_index];
+	node->children++;
+	memmove(&key(node)[node->children - 1],&key(right)[0],(right->children - 1)* sizeof(key_t));
+	memmove(&sub(node)[node->children - 1],&sub(right)[0],right->children * sizeof(off_t));
+
+	int i,j;
+	for(i = node->children - 1, j = 0; j < right->children; i++,j++)	sub_node_flush(tree,node,sub(node)[i]);
+
+	node->children += right->children - 1;
+}
 
 
+static inline void non_leaf_simple_remove(bplus_tree * tree, bplus_node * node, int remove)
+{
+	assert(node->children >= 2);
+	memmove(&key(node)[remove],&key(node)[remove + 1],(node->children - remove - 2) * sizeof(key_t));
+	memmove(&sub(node)[remove + 1],&sub(node)[remove + 2],(node->children - remove - 2) * sizeof(off_t));
+	node->children--;
+}
 
 
+static void non_leaf_remove(bplus_tree * tree, bplus_node * node, int remove)
+{
+	if(node->parent == Invalid_Offset)
+	{
+		if(node->children == 2)
+		{
+			bplus_node * root = node_fetch(tree,sub(node)[0]);
+			root->parent = Invalid_Offset;
+			tree->root = root->self;
+			tree->level--;
+			node_delete(tree,node,NULL,NULL);
+			node_flush(tree,root);
+		}
+		else
+		{
+			non_leaf_simple_remove(tree,node,remove);
+			node_flush(tree,node);
+		}
+	}
+	else if(node->children <= (_max_order + 1)/2)
+	{
+		bplus_node * l_sib = node_fetch(tree,node->prev);
+		bplus_node * r_sib = node_fetch(tree,node->next);
+		bplus_node * parent = node_fetch(tree,node->parent);
+
+		int i = parent_key_index(parent,key(node)[0]);
+
+		if(sibling_select(l_sib,r_sib,parent,i) == Left_Sibling)
+		{
+			if(l_sib->children > (_max_order + 1) / 2)
+			{
+				non_leaf_shift_from_left(tree,node,l_sib,parent,i,remove);
+
+				node_flush(tree,node);
+				node_flush(tree,l_sib);
+				node_flush(tree,r_sib);
+				node_flush(tree,parent);
+			}
+			else 
+			{
+				non_leaf_merge_into_left(tree,node,l_sib,parent,i,remove);
+				node_delete(tree,node,l_sib,r_sib);
+				non_leaf_remove(tree,parent,i);
+			}
+		}
+		else 
+		{
+			non_leaf_simple_remove(tree,node,remove);
+			if(r_sib->children > (_max_order + 1)/2)
+			{
+				non_leaf_shift_from_right(tree,node,r_sib,parent,i+1);
+
+				node_flush(tree,node);
+				node_flush(tree,l_sib);
+				node_flush(tree,r_sib);
+				node_flush(tree,parent);
+			}
+			else 
+			{
+				non_leaf_merge_from_right(tree,node,r_sib,parent,i+1);
+
+				bplus_node *rr_sib = node_fetch(tree,r_sib->next);
+				node_delete(tree,r_sib,node,rr_sib);
+				node_flush(tree,l_sib);
+				non_leaf_remove(tree,parent,i+1);
+			}
+		}
+	}
+	else
+	{
+		non_leaf_simple_remove(tree,node,remove);
+		node_flush(tree,node);
+	}
+}
+
+static void leaf_shift_from_left(bplus_tree * tree, bplus_node * leaf, bplus_node *left, bplus_node * parent, int parent_key_index, int remove)
+{
+	memmove(&key(leaf)[1],&key(leaf)[0],remove * sizeof(key_t));
+	memmove(&data(leaf)[1],&data(leaf)[0], remove * sizeof(off_t));
+
+	key(leaf)[0] = key(left)[left->children - 1];
+	data(leaf)[0] = data(left)[left->children - 1];
+	left->children--;
+
+	key(parent)[parent_key_index] = key(leaf)[0];
+}
+
+static void leaf_merge_into_left(bplus_tree * tree, bplus_node * leaf, bplus_node * left, int parent_key_index, int remove)
+{
+	memmove(&key(left)[left->children], &key(leaf)[0].remove * sizeof(key_t));
+	memmove(&data(left)[left->children],&data(leaf)[0],remove * sizeof(off_t));
+	memmove(&key(left)[left->children + remove], &key(leaf)[remove + 1],(leaf->children - remove -1) * sizeof(key_t));
+	memmove(&data(left)[left->children + remove], &key(leaf)[remove + 1],(leaf->children - remove - 1) * sizeof(off_t));
+
+	left->children += leaf->children - 1;
+}
 
 
+static void leaf_shift_from_right(bplus_tree * tree, bplus_node * leaf, bplus_node * right, bplus_node * parent, int parent_key_index)
+{
+	key(leaf)[leaf->children] = key(right)[0];
+	data(leaf)[leaf->children] = data(right)[0];
+	leaf->children++;
 
+	memmove(&key(right)[0]. &key(right)[1],(right->children - 1) * sizeof(key_t));
+	memmove(&data(right)[0], &data(right)[1],(right->children - 1) * sizeof(off_t));
+	right->children--;
 
+	key(parent)[parent_key_index] = key(right)[0];
 
+}
 
+static inline void leaf_merge_from right(bplus_tree * tree, bplus_node * leaf, bplus_node * right)
+{
+	memmove(&key(leaf)[leaf->children], &key(right)[0], right->children * sizeof(key_t));
+	memmove(&data(leaf)[leaf->children], &data(right)[0].right->children * sizeof(off_t));
+	leaf->children += right->children;
+}
 
+static inline void leaf_simple_remove(bplus_tree * tree, bplus_node * leaf, int remove)
+{
+	memmove(&key(leaf)[remove], &key(leaf)[remove + 1],(leaf->children - remove - 1) * sizeof(key_t));
+	memmove(&data(leaf)[remove],&data(leaf)[remove + 1],(leaf->children - remove - 1) * sizeof(off_t));
+	leaf->children--;
+}
 
+static int leaf_remove(bplus_tree * tree, bpkus_node * leaf, key_t key)
+{
+	int remove = key_binary_search(leaf,key);
+	if(remove < 0) return -1;
 
+	int i = ((char*) leaf- tree->caches)/_block_size;
+	tree->used[i] = 1;
 
+	if(leaf->parent == Invalid_Offset)
+	{
+		if(leaf->children == 1)
+		{
+			assert(key == key(leaf)[0]);
+			tree->root = Invalid_Offset;
+			tree->level = 0;
+			node_delete(tree,leaf,NULL,NULL);
+		}
+		else 
+		{
+			leaf_simple_remove(tree,leaf,remove);
+			node_flush(tree,leaf);
+		}
+	}
+	else if(leaf->children <= (_max_entries + 1) /2)
+	{
+		bplus_node * l_sib = node_fetch(tree,leaf->prev);
+		bplus_node * r_sib = node_fetch(tree,leaf->next);
+		bplus_node * parent = node_fetch(tree,leaf->parent);
 
+		i = parent_key_index(parent,key(leaf)[0]);
 
+		if(sibling_select(l_sib,r_sib,parent,i) == Left_Sibling)
+		{
+			if(l_sib->children > (_max_entries + 1)/2)
+			{
+				leaf_shift_from_left(tree,leaf,l_sib,parent,i,remove);
 
+				node_flush(tree,leaf);
+				node_flush(tree,l_sib);
+				node_flush(tree,r_sib);
+				node_flush(tree,parent);
+			}
+			else 
+			{
+				leaf_merge_into_left(tree,leaf,l_sib,i,remove);
+				node_delete(tree,leaf,l_sib,r_sib);
+				non_leaf_remove(tree,parent,i);
+			}
+		}
+		else 
+		{
+			leaf_simple_remove(tree,leaf,remove);
 
+			if(r_sib->children > (_max_entries + 1)/2)
+			{
+				node_flush(tree,leaf);
+				node_flush(tree,l_sib);
+				node_flush(tree,r_sib);
+				node_flush(tree,parent);
+			}
+			else 
+			{
+				leaf_merge_from_right(tree,leaf,r_sib);
+				bplus_node * rr_sib = node_fetch(tree,r_sib->next);
+				node_delete(tree,r_sib,leaf,rr_sib);
+				node_flush(tree,l_sib);
+				non_leaf_remove(tree,parent,i+1);
+			}
+		}
+	}
+	else 
+	{
+		leaf_simple_remove(tree,leaf,remove);
+		node_flush(tree,leaf);
+	}
+	return 0;
+}
 
 
 
