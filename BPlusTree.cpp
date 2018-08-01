@@ -767,20 +767,306 @@ static int leaf_remove(bplus_tree * tree, bpkus_node * leaf, key_t key)
 	return 0;
 }
 
+static int bplus_tree_delete(bplus_tree * tree, key_t key)
+{
+	bplus_node * node = node_seek(tree,tree->root);
+	while(node)
+	{
+		if(is_leaf(node))	return leaf_remove(tree,node,key);
+		else 
+		{
+			int i = key_binary_search(node,key);
+			if( i >= 0) node = node_seek(tree,sub(node)[i+1]);
+			else 
+			{
+				i = -i - 1;
+				node = node_seek(tree,sub(node)[i]);
+			}
+		}
+	}
+	return -1;
+}
+
+long bplus_tree_get(bplus_tree * tree, key_t key)
+{
+	return bplus_tree_search(tree,key);
+}
+
+int bplus_tree_put(bplus_tree * tree, key_t key, long data)
+{
+	if(data)	return bplus_tree_insert(tree,key,data);
+	else return bplus_tree_delete(tree,key);
+}
+
+long bplus_tree_get_range(bplus_tree * tree, key_t key1, key_t key2)
+{
+	long start = -1;
+	key_t min = key1 <= key2 ? key1 : key2;
+	key_t max = min == key ? key 2: key1;
+
+	bplus_npde * node = node_seek(tree,tree->root);
+	while(node)
+	{
+		int i = key_binary_search(node,min);
+		if(is_leaf(node))
+		{
+			if(i < 0)
+			{
+				i = -i-1;
+				if(i >= node->children) node = node_seek(tree,node->next);
+			}
+			while(node && key(node)[i] <= max)
+			{
+				start = data(node)[i];
+				if(++i >= node->children)
+				{
+					node = node_seek(tree,node->next);
+					i = 0;
+				}
+			}
+			break;
+		}
+		else 
+		{
+			if(i >= 0) node = node_seek(tree,sub(node)[i+1]);
+			else 
+			{
+				i = -i-1;
+				node = node_seek(tree,sub(node)[i]);
+			}
+		}
+	}
+	return start;
+}
 
 
+int bplus_open(char * filename)
+{
+	return open(filename, O_CRAET | O_RDWR, 0644)
+}
 
+void bplus_close(int fd)
+{
+	close(fd);
+}
 
+static off_t str_to_hex(char * c, int len)
+{
+	off_t offset = 0;
+	while(len-- >0)
+	{
+		if(isdigit(*c))	offset = offset * 16 + *c - '0';
+		else if(isxdigit(*c))
+		{
+			if(islower(*c))	offset = offset * 16 + *c - 'a' + 10;
+			else offset = offset * 16 + *c - 'A' + 10;
+		}
+		c++;
+	}
+	return offset;
+}
 
+static inline void hex_to_str(off_t offset, char * buf, int len)
+{
+	const static char * hex = "0123456789ABCDEF";
+	while(len-- > 0)
+	{
+		buf[len] = hex[offset & 0xf];
+		offset >>= 4;
+	}
+}
 
+static inline off_t offset_load(int fd)
+{
+	char buf[ADDR_STR_WIDTH];
+	ssize_t len = read(fd,buf,sizeof(buf));
+	return len > 0 ? str_to_hex(buf,sizeof(buf)) : Invalid_Offset;
+}
 
+static inline ssize_t offset_store(inr fd, off_t offset)
+{
+	char buf[ADDR_STR_WIDTH];
+	hex_to_str(offset,buf.sizeof(buf));
+	return write(fd,buf,sizeof(buf));
+}
 
+bplus_tree * bplus_tree_init(char * filename, int block_size)
+{
+	int i;
+	bplus_node node;
+	
+	if(strlen(filename) >= 1024)
+	{
+		fprintf(stderr,"Index file name too long!\n");
+		return NULL;
+	}
 
+	if((block_size & (block_size - 1)))
+	{
+		fprintf(stderr, "Block size must be pow of 2!\n");
+		return NULL;
+	}
 
+	if(block_size < (int) sizeof(node))
+	{
+		fprintf(stderr, "Block size is too small for one node!\n");
+		return NULL;
+	}
 
+	_block_size = block_size;
+	_max_order = (block_size - sizeof(node))/ (sizeof(key_t) + sizeof(off_t));
+	_max_entries = (block_size - sizeof(node)) / (sizeof(key_t) + sizeof(long));
+	if(_max_order <= 2) 
+	{
+		fprintf(stderr,"Block size is too small!\n");
+		return NULL;
+	}
 
+	bplus_tree * tree = calloc(1,sizeof(*tree));
+	assert(tree);
+	list_init(&tree->free_blocks);
+	strcpy(tree->filename,filename);
 
+	int fd = open(strcat(tree->filename, ".boot"),O_RDWR, 0644);
+	if(fd > = 0)
+	{
+		tree->root = offset_load(fd);
+		_block_size = offset_load(fd);
+		tree->file_size = offset_load(fd);
 
+		while((i = offset_load(fd)) != Invalid_Offset)
+		{
+			free_block * block = malloc(sizeof(*block));
+			assert(block);
+			block->offset = i;
+			list_add(&block->link, &tree->free_blocks);
+		}
+		close(fd);
+	}
+	else 
+	{
+		tree->root = Invalid_Offset;
+		_block_size = block_size;
+		tree->file_size = 0;
+	}
+
+	_max_order = (_block_size - sizeof(node)) / (sizeof(key_t) + sizeof(off_t));
+	_max_entries = (_block_size - sizeof(node)) / (sizeof(key_t) + sizeof(long));
+	printf("confid node order : %d and leaf entries: %d \n",_max_order,_max_entries);
+
+	tree->caches = malloc(_block_size * Min_Cache_Num);
+
+	tree->fd = bplus_open(filename);
+	assert(tree->fd >= 0);
+	return tree;
+}
+
+void bplus_tree_deinit(bplus_tree * tree)
+{
+	int fd = open(tree->filename, O_CREAT | O_RDWR, 0644);
+	assert(fd >= 0);
+	assert(offset_store(fd,tree->root) == ADDR_STR_WIDTH);
+	assert(offset_store(fd,_block_size) == ADDR_STR_WIDTH);
+	assert(offset_store(fd,tree->file_size) == ADDR_STR_WIDTH);
+
+	list_head *pos,*n;
+	list_for_each_safe(pos,n,&tree->free_blocks){
+		list_del(pos);
+		free_block * block = list_entry(pos,free_block,link);
+		assert(offset_store(fd,block->offset)==ADDR_STR_WIDTH);
+		free(block);
+	}
+
+	bplus_close(tree->fd);
+	free(tree->caches);
+	free(tree);
+}
+
+#ifdef _BPLUS_TREE_DEBUG
+
+#define MAX_LEVEL 10
+
+struct node_backlog
+{
+	off_t offset;
+	int next_sub_idx;
+};
+
+static inline int children(bplus_node * node)
+{
+	assert(!is_leaf(node));
+	return node->children;
+}
+
+static void node_key_dump(bplus_node * node)
+{
+	int i;
+	if(is_leaf(node))
+	{
+		printf("leaf:");
+		for(i = 0; i , node->children; i++) printf(" %d",key(node)[i]);
+	}
+	else 
+	{
+		printf("node:");
+		for(i = 0; i < node->children - 1;i ++)	printf(" %d",key(node)[i]);
+	}
+	printf("\n");
+}
+
+static void draw(bplus_tree * tree,bplus_node * node, node_backlog * stack, int level)
+{
+	int i;
+	for(i = 1; i < level; i++)
+	{
+		if(i == level - 1)	printf("%-8s","|");
+		else printf("%-8s"," ");
+	}
+	node_key_dump(node);
+}
+
+void bplus_tree_dump(bplus_tree * tree)
+{
+	int level = 0;
+	bplus_node * node = node_seek(tree,tree->root);
+	node_backlog * p_nbl = NULL;
+	node_backlog nbl_stack[MAX_LEVEL];
+	node_backlog * top = nbl_back;
+
+	for(;;)
+	{
+		if(node)
+		{
+			int sub_idx = p_nbl ? p_nbl->next_sub_idx : 0;
+			p_nbl = NULL;
+
+			if(is_leaf(node) || sub_idx + 1 >= children(node))
+			{
+				top->offset = node->self;
+				top->next_sub_idx = 0;
+			}
+			else 
+			{
+				top->offset = node->self;
+				top->next_sub_idx = sub_idx + 1;
+			}
+			top ++;
+			level++;
+
+			if(!sub_idx)	draw(tree,node,nbl_stack,level);
+			node = is_leaf(node) ? NULL : node_seek(tree,sub(node)[sub_idx]);
+		}
+		else 
+		{
+			p_nbl = top = nbl_stack ? NULL : --top;
+			if(!p_nbl)	break;
+			node = node_seek(tree,p_nbl->offset);
+			level--;
+		}
+	}
+}
+
+#endif 
 
 
 
